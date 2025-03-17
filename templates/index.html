@@ -1,0 +1,686 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OCR PDF với Server AI</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        .container { max-width: 900px; }
+        #resultContainer { display: none; }
+        #resultText { height: 400px; overflow-y: auto; }
+        #logArea { height: 150px; overflow-y: auto; background-color: #f8f9fa; padding: 10px; border-radius: 5px; }
+        .progress { height: 25px; }
+        .hardware-id-container { 
+            border: 1px solid #dee2e6; 
+            border-radius: 5px; 
+            padding: 15px; 
+            margin-bottom: 20px; 
+        }
+        .card-body img { max-width: 100%; }
+    </style>
+</head>
+<body>
+    <div class="container my-4">
+        <h1 class="text-center mb-4">OCR PDF với Server AI</h1>
+        
+        <!-- Hardware ID Section -->
+        <div class="hardware-id-container">
+            <h4>Hardware ID</h4>
+            <div class="row mb-2">
+                <div class="col">
+                    <input type="text" id="hardwareId" class="form-control" readonly>
+                </div>
+            </div>
+            <div class="row">
+                <div class="col">
+                    <div id="activationStatus" class="alert alert-warning">
+                        Trạng thái: CHƯA KÍCH HOẠT
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- File Upload Section -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0">Chọn file PDF</h5>
+            </div>
+            <div class="card-body">
+                <form id="uploadForm">
+                    <div class="mb-3">
+                        <input class="form-control" type="file" id="pdfFile" accept=".pdf" disabled>
+                        <div id="fileInfo" class="form-text">Chưa chọn file nào</div>
+                    </div>
+                    <div class="d-grid">
+                        <button type="submit" class="btn btn-primary" id="processBtn" disabled>Xử lý OCR</button>
+                    </div>
+                </form>
+
+                <div class="mt-3">
+                    <div class="progress mb-2">
+                        <div class="progress-bar" id="progressBar" role="progressbar" style="width: 0%;" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+                    </div>
+                    <div id="statusText" class="text-center">Sẵn sàng</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Log Area -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0">Nhật ký hoạt động</h5>
+            </div>
+            <div class="card-body">
+                <div id="logArea"></div>
+            </div>
+        </div>
+
+        <!-- Results Section -->
+        <div id="resultContainer" class="card mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0">Kết quả OCR</h5>
+                <div>
+                    <button id="btnViewImages" class="btn btn-info btn-sm me-2" disabled>Xem hình ảnh</button>
+                    <button id="btnExportWord" class="btn btn-success btn-sm" disabled>Xuất sang Word</button>
+                </div>
+            </div>
+            <div class="card-body">
+                <textarea id="resultText" class="form-control" readonly></textarea>
+            </div>
+        </div>
+
+        <!-- Images Modal -->
+        <div class="modal fade" id="imagesModal" tabindex="-1" aria-hidden="true">
+            <div class="modal-dialog modal-lg">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Hình ảnh từ OCR</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div id="imagesContainer"></div>
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Đóng</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Generate hardware ID using browser fingerprinting
+        async function generateHardwareId() {
+            const fpPromise = import('https://openfpcdn.io/fingerprintjs/v3')
+                .then(FingerprintJS => FingerprintJS.load());
+            
+            const fp = await fpPromise;
+            const result = await fp.get();
+
+            // Get some additional browser info
+            const cpuCores = navigator.hardwareConcurrency || '';
+            const platform = navigator.platform || '';
+            const userAgent = navigator.userAgent || '';
+            
+            // Create combined hardware info
+            const hardwareInfo = {
+                cpu_id: result.visitorId + cpuCores,
+                bios_serial: platform + result.visitorId.substring(0, 8),
+                motherboard_serial: userAgent.slice(0, 20) + result.visitorId.substring(8, 16)
+            };
+            
+            // Get hardware ID from server
+            try {
+                const response = await fetch('/api/hardware-id', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(hardwareInfo)
+                });
+                
+                const data = await response.json();
+                if (data.success) {
+                    document.getElementById('hardwareId').value = data.hardware_id;
+                    updateActivationStatus(data.activated);
+                } else {
+                    logMessage('Lỗi: ' + data.error);
+                }
+            } catch (error) {
+                logMessage('Lỗi khi lấy Hardware ID: ' + error);
+            }
+        }
+
+        function updateActivationStatus(activated) {
+            const statusElement = document.getElementById('activationStatus');
+            const fileInput = document.getElementById('pdfFile');
+            
+            if (activated) {
+                statusElement.className = 'alert alert-success';
+                statusElement.textContent = 'Trạng thái: ĐÃ KÍCH HOẠT';
+                fileInput.disabled = false;
+                logMessage('Phần mềm đã được kích hoạt, sẵn sàng sử dụng');
+            } else {
+                statusElement.className = 'alert alert-warning';
+                statusElement.textContent = 'Trạng thái: CHƯA KÍCH HOẠT';
+                fileInput.disabled = true;
+                logMessage('Vui lòng kích hoạt phần mềm trước khi sử dụng');
+            }
+        }
+
+        function logMessage(message) {
+            const logArea = document.getElementById('logArea');
+            const timestamp = new Date().toLocaleTimeString();
+            logArea.innerHTML += `<div>[${timestamp}] ${message}</div>`;
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+
+        function updateProgress(percent, message) {
+            const progressBar = document.getElementById('progressBar');
+            const statusText = document.getElementById('statusText');
+            
+            progressBar.style.width = percent + '%';
+            progressBar.textContent = percent + '%';
+            progressBar.setAttribute('aria-valuenow', percent);
+            
+            if (message) {
+                statusText.textContent = message;
+                logMessage(message);
+            }
+        }
+
+        // Hàm kiểm tra và khôi phục kết quả từ localStorage
+        function checkForSavedResults() {
+            try {
+                const savedResultId = localStorage.getItem('lastResultId');
+                const savedImageCount = localStorage.getItem('lastImageCount');
+                const savedResultText = localStorage.getItem('lastResultText');
+                
+                if (savedResultId && savedResultText) {
+                    logMessage('Đang khôi phục kết quả OCR từ phiên trước...');
+                    
+                    // Khôi phục kết quả
+                    window.resultId = savedResultId;
+                    window.imageCount = parseInt(savedImageCount || '0');
+                    
+                    // Hiển thị kết quả
+                    document.getElementById('resultContainer').style.display = 'block';
+                    document.getElementById('resultText').value = savedResultText;
+                    
+                    // Kích hoạt nút xuất Word và xem hình ảnh
+                    document.getElementById('btnExportWord').disabled = false;
+                    
+                    if (window.imageCount > 0) {
+                        document.getElementById('btnViewImages').disabled = false;
+                        logMessage(`Khôi phục thành công với ${window.imageCount} hình ảnh`);
+                    } else {
+                        document.getElementById('btnViewImages').disabled = true;
+                        logMessage('Khôi phục thành công nhưng không có hình ảnh');
+                    }
+                    
+                    return true;
+                }
+            } catch (e) {
+                logMessage('Không thể khôi phục kết quả trước đó: ' + e.message);
+            }
+            
+            return false;
+        }
+
+        async function processOCR(formData) {
+            try {
+                updateProgress(10, 'Đang tải file lên...');
+                
+                const response = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const result = await response.json();
+                
+                if (result.success) {
+                    updateProgress(100, 'Xử lý OCR hoàn tất thành công');
+                    
+                    // Hiển thị kết quả
+                    document.getElementById('resultContainer').style.display = 'block';
+                    document.getElementById('resultText').value = result.text;
+                    
+                    // Lưu kết quả ID để tải hình ảnh sau này
+                    window.resultId = result.result_id;
+                    window.imageCount = result.image_count;
+                    
+                    // Lưu vào localStorage để phòng trường hợp trang được làm mới
+                    try {
+                        localStorage.setItem('lastResultId', result.result_id);
+                        localStorage.setItem('lastImageCount', result.image_count);
+                        localStorage.setItem('lastResultText', result.text);
+                        logMessage('Đã lưu kết quả vào bộ nhớ cục bộ');
+                    } catch (e) {
+                        logMessage('Không thể lưu kết quả vào bộ nhớ cục bộ: ' + e.message);
+                    }
+                    
+                    // Kích hoạt nút xuất Word và xem hình ảnh
+                    document.getElementById('btnExportWord').disabled = false;
+                    
+                    if (result.image_count > 0) {
+                        document.getElementById('btnViewImages').disabled = false;
+                        logMessage(`Tìm thấy ${result.image_count} hình ảnh trong kết quả OCR`);
+                    } else {
+                        document.getElementById('btnViewImages').disabled = true;
+                        logMessage("Không tìm thấy hình ảnh trong kết quả OCR");
+                    }
+                    
+                } else {
+                    updateProgress(0, 'Lỗi: ' + result.error);
+                }
+            } catch (error) {
+                updateProgress(0, 'Lỗi xử lý: ' + error);
+            }
+        }
+
+        async function loadImages() {
+            if (!window.resultId) {
+                logMessage('Không có kết quả OCR để hiển thị hình ảnh');
+                return;
+            }
+            
+            try {
+                // Hiển thị thông báo đang tải
+                const loadingDiv = document.createElement('div');
+                loadingDiv.className = 'text-center mb-4';
+                loadingDiv.innerHTML = `
+                    <div class="spinner-border text-primary mb-3" role="status">
+                        <span class="visually-hidden">Đang tải...</span>
+                    </div>
+                    <p>Đang tải hình ảnh...</p>
+                `;
+                
+                const imagesContainer = document.getElementById('imagesContainer');
+                imagesContainer.innerHTML = '';
+                imagesContainer.appendChild(loadingDiv);
+                
+                logMessage('Đang tải thông tin hình ảnh từ kết quả OCR...');
+                
+                const response = await fetch(`/results/${window.resultId}`);
+                const result = await response.json();
+                
+                if (result.success) {
+                    imagesContainer.innerHTML = '';
+                    
+                    if (result.image_count === 0) {
+                        imagesContainer.innerHTML = '<div class="text-center">Không có hình ảnh để hiển thị</div>';
+                        return;
+                    }
+                    
+                    logMessage(`Đã tìm thấy ${result.image_count} hình ảnh, đang tải...`);
+                    
+                    // Nếu API trả về danh sách ID hình ảnh
+                    const imageIds = result.image_ids || [];
+                    
+                    if (imageIds.length > 0) {
+                        // Hiển thị thông tin đang tải
+                        const progressDiv = document.createElement('div');
+                        progressDiv.className = 'progress mb-4';
+                        progressDiv.innerHTML = `
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                                 id="imageLoadProgress" role="progressbar" 
+                                 style="width: 0%" 
+                                 aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+                        `;
+                        imagesContainer.appendChild(progressDiv);
+                        
+                        const progressBar = document.getElementById('imageLoadProgress');
+                        
+                        // Tải từng hình ảnh theo ID
+                        for (let i = 0; i < imageIds.length; i++) {
+                            const imageId = imageIds[i];
+                            try {
+                                const imageResponse = await fetch(`/images/${window.resultId}/${imageId}`);
+                                
+                                if (imageResponse.ok) {
+                                    const blob = await imageResponse.blob();
+                                    const imageUrl = URL.createObjectURL(blob);
+                                    
+                                    const imageDiv = document.createElement('div');
+                                    imageDiv.className = 'mb-4';
+                                    imageDiv.innerHTML = `
+                                        <h5 class="text-primary">Hình ảnh: ${imageId}</h5>
+                                        <div class="text-center">
+                                            <img src="${imageUrl}" class="img-fluid mb-2" alt="${imageId}">
+                                        </div>
+                                    `;
+                                    
+                                    imagesContainer.appendChild(imageDiv);
+                                    
+                                    // Cập nhật tiến trình
+                                    const percent = Math.round(((i + 1) / imageIds.length) * 100);
+                                    progressBar.style.width = `${percent}%`;
+                                    progressBar.textContent = `${percent}%`;
+                                    progressBar.setAttribute('aria-valuenow', percent);
+                                } else {
+                                    const errorDiv = document.createElement('div');
+                                    errorDiv.className = 'alert alert-warning mb-4';
+                                    errorDiv.textContent = `Không thể tải hình ảnh: ${imageId}`;
+                                    imagesContainer.appendChild(errorDiv);
+                                }
+                            } catch (e) {
+                                logMessage(`Lỗi khi tải hình ảnh ${imageId}: ${e.message}`);
+                            }
+                        }
+                        
+                        // Xóa thanh tiến trình sau khi tải xong
+                        imagesContainer.removeChild(progressDiv);
+                        
+                    } else {
+                        // Cách cũ - Thử tải hình ảnh theo thứ tự
+                        logMessage('Không có danh sách ID cụ thể, thử tải theo thứ tự');
+                        
+                        for (let i = 1; i <= result.image_count; i++) {
+                            const imageId = `img-${i}.jpeg`;
+                            try {
+                                const imageResponse = await fetch(`/images/${window.resultId}/${imageId}`);
+                                
+                                if (imageResponse.ok) {
+                                    const blob = await imageResponse.blob();
+                                    const imageUrl = URL.createObjectURL(blob);
+                                    
+                                    const imageDiv = document.createElement('div');
+                                    imageDiv.className = 'mb-4';
+                                    imageDiv.innerHTML = `
+                                        <h5 class="text-primary">Hình ảnh: ${imageId}</h5>
+                                        <div class="text-center">
+                                            <img src="${imageUrl}" class="img-fluid mb-2" alt="${imageId}">
+                                        </div>
+                                    `;
+                                    
+                                    imagesContainer.appendChild(imageDiv);
+                                } else {
+                                    const errorDiv = document.createElement('div');
+                                    errorDiv.className = 'alert alert-warning mb-4';
+                                    errorDiv.textContent = `Không thể tải hình ảnh: ${imageId}`;
+                                    imagesContainer.appendChild(errorDiv);
+                                }
+                            } catch (e) {
+                                logMessage(`Lỗi khi tải hình ảnh ${imageId}: ${e.message}`);
+                            }
+                        }
+                    }
+                    
+                    if (imagesContainer.children.length === 0) {
+                        imagesContainer.innerHTML = '<div class="alert alert-danger">Không thể tải hình ảnh nào</div>';
+                    }
+                    
+                } else {
+                    imagesContainer.innerHTML = `<div class="alert alert-danger">Lỗi khi tải hình ảnh: ${result.error}</div>`;
+                    logMessage('Lỗi khi tải hình ảnh: ' + result.error);
+                }
+            } catch (error) {
+                document.getElementById('imagesContainer').innerHTML = `<div class="alert alert-danger">Lỗi khi tải hình ảnh: ${error.message}</div>`;
+                logMessage('Lỗi khi tải hình ảnh: ' + error.message);
+            }
+        }
+
+        // Event Listeners
+        document.addEventListener('DOMContentLoaded', function() {
+            generateHardwareId();
+            
+            const uploadForm = document.getElementById('uploadForm');
+            const fileInput = document.getElementById('pdfFile');
+            const processBtn = document.getElementById('processBtn');
+            const fileInfo = document.getElementById('fileInfo');
+            const btnViewImages = document.getElementById('btnViewImages');
+            const imagesModal = new bootstrap.Modal(document.getElementById('imagesModal'));
+            
+            // Kiểm tra xem có kết quả được lưu từ trước không
+            const hasRestoredResults = checkForSavedResults();
+            if (hasRestoredResults) {
+                logMessage('Đã khôi phục kết quả OCR từ phiên trước');
+            }
+            
+            fileInput.addEventListener('change', function() {
+                if (this.files && this.files[0]) {
+                    const file = this.files[0];
+                    if (file.type !== 'application/pdf') {
+                        fileInfo.textContent = 'Vui lòng chọn file PDF';
+                        processBtn.disabled = true;
+                        return;
+                    }
+                    
+                    fileInfo.textContent = `Đã chọn: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`;
+                    processBtn.disabled = false;
+                    logMessage(`File đã chọn: ${file.name}`);
+                } else {
+                    fileInfo.textContent = 'Chưa chọn file nào';
+                    processBtn.disabled = true;
+                }
+            });
+            
+            uploadForm.addEventListener('submit', function(e) {
+                e.preventDefault();
+                
+                if (!fileInput.files || !fileInput.files[0]) {
+                    logMessage('Vui lòng chọn file PDF trước');
+                    return;
+                }
+                
+                const formData = new FormData();
+                formData.append('file', fileInput.files[0]);
+                formData.append('hardware_id', document.getElementById('hardwareId').value);
+                
+                processBtn.disabled = true;
+                updateProgress(0, 'Đang bắt đầu xử lý OCR...');
+                
+                processOCR(formData).finally(() => {
+                    processBtn.disabled = false;
+                });
+            });
+            
+            btnViewImages.addEventListener('click', function() {
+                loadImages().then(() => {
+                    imagesModal.show();
+                });
+            });
+            
+            // Thêm event listener cho imagesModal để làm mới hình ảnh khi mở lại
+            document.getElementById('imagesModal').addEventListener('show.bs.modal', function() {
+                loadImages();
+            });
+            
+            // Export to Word event listener
+            document.getElementById('btnExportWord').addEventListener('click', function() {
+                if (!window.resultId) {
+                    logMessage('Không có kết quả OCR để xuất sang Word');
+                    return;
+                }
+                
+                // Hiển thị thông báo đang xử lý
+                updateProgress(30, 'Đang chuẩn bị xuất sang Word...');
+                
+                // Hiển thị modal thông báo đang xử lý
+                const processingModalDiv = document.createElement('div');
+                processingModalDiv.className = 'modal fade show';
+                processingModalDiv.id = 'processingModal';
+                processingModalDiv.style.display = 'block';
+                processingModalDiv.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+                processingModalDiv.setAttribute('tabindex', '-1');
+                
+                processingModalDiv.innerHTML = `
+                    <div class="modal-dialog modal-dialog-centered">
+                        <div class="modal-content">
+                            <div class="modal-body text-center">
+                                <div class="spinner-border text-primary mb-3" role="status">
+                                    <span class="visually-hidden">Đang xử lý...</span>
+                                </div>
+                                <h5>Đang xuất sang Word...</h5>
+                                <p>Quá trình này có thể mất một lúc, vui lòng đợi.</p>
+                                <div id="exportTimer" class="text-muted mt-2">0:00</div>
+                                <button id="cancelExport" class="btn btn-sm btn-outline-secondary mt-3">Hủy</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                document.body.appendChild(processingModalDiv);
+                
+                // Bắt đầu đếm thời gian
+                let seconds = 0;
+                const timerElement = document.getElementById('exportTimer');
+                const timerInterval = setInterval(() => {
+                    seconds++;
+                    const minutes = Math.floor(seconds / 60);
+                    const remainingSeconds = seconds % 60;
+                    timerElement.textContent = `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+                }, 1000);
+                
+                // Xử lý sự kiện hủy
+                document.getElementById('cancelExport').addEventListener('click', function() {
+                    clearInterval(timerInterval);
+                    document.body.removeChild(processingModalDiv);
+                    updateProgress(0, 'Đã hủy xuất Word');
+                    logMessage('Đã hủy quá trình xuất Word');
+                    
+                    if (window.downloadFrame) {
+                        try {
+                            document.body.removeChild(window.downloadFrame);
+                            window.downloadFrame = null;
+                        } catch (e) {
+                            console.error('Lỗi khi xóa frame:', e);
+                        }
+                    }
+                });
+                
+                // Tạo URL để tải về file Word
+                const exportUrl = `/export/word/${window.resultId}`;
+                
+                // Tạo một iframe ẩn để tải file
+                const downloadFrame = document.createElement('iframe');
+                downloadFrame.style.display = 'none';
+                window.downloadFrame = downloadFrame;
+                document.body.appendChild(downloadFrame);
+                
+                // Thiết lập timeout cho quá trình xuất Word
+                const exportTimeout = setTimeout(() => {
+                    clearInterval(timerInterval);
+                    if (document.body.contains(processingModalDiv)) {
+                        document.body.removeChild(processingModalDiv);
+                    }
+                    if (document.body.contains(downloadFrame)) {
+                        document.body.removeChild(downloadFrame);
+                    }
+                    window.downloadFrame = null;
+                    
+                    updateProgress(0, 'Xuất Word thất bại: Quá thời gian chờ');
+                    logMessage('Quá trình xuất Word đã quá thời gian chờ (60 giây). Vui lòng thử lại sau.');
+                    
+                    // Hiển thị thông báo lỗi
+                    const errorModal = new bootstrap.Modal(document.createElement('div'));
+                    errorModal.element.innerHTML = `
+                        <div class="modal-dialog">
+                            <div class="modal-content">
+                                <div class="modal-header bg-danger text-white">
+                                    <h5 class="modal-title">Lỗi xuất Word</h5>
+                                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                </div>
+                                <div class="modal-body">
+                                    <p>Quá trình xuất Word đã quá thời gian chờ (60 giây).</p>
+                                    <p>Nguyên nhân có thể do:</p>
+                                    <ul>
+                                        <li>Kết nối mạng không ổn định</li>
+                                        <li>Máy chủ Pandoc đang bận</li>
+                                        <li>Dữ liệu quá lớn để xử lý</li>
+                                    </ul>
+                                    <p>Bạn có thể thử lại sau hoặc thử với file nhỏ hơn.</p>
+                                </div>
+                                <div class="modal-footer">
+                                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Đóng</button>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                    document.body.appendChild(errorModal.element);
+                    errorModal.show();
+                    
+                    document.querySelector(errorModal.element).addEventListener('hidden.bs.modal', function() {
+                        document.body.removeChild(errorModal.element);
+                    });
+                    
+                }, 60000); // 60 giây timeout
+                
+                // Theo dõi khi tải xong
+                downloadFrame.onload = function() {
+                    clearTimeout(exportTimeout);
+                    clearInterval(timerInterval);
+                    
+                    try {
+                        // Kiểm tra xem frame có chứa nội dung lỗi hay không
+                        const frameContent = downloadFrame.contentDocument || downloadFrame.contentWindow.document;
+                        if (frameContent && frameContent.body && frameContent.body.textContent) {
+                            const responseText = frameContent.body.textContent;
+                            if (responseText.includes('"success":false') || responseText.includes('error')) {
+                                try {
+                                    const errorData = JSON.parse(responseText);
+                                    throw new Error(errorData.error || 'Lỗi khi xử lý Word');
+                                } catch (e) {
+                                    if (e instanceof SyntaxError) {
+                                        // Không phải JSON, có thể là file đã được tải về thành công
+                                        updateProgress(100, 'Xuất sang Word hoàn tất');
+                                        logMessage('Đã xuất thành công sang file Word');
+                                    } else {
+                                        throw new Error(responseText || 'Lỗi khi xử lý Word');
+                                    }
+                                }
+                            } else {
+                                updateProgress(100, 'Xuất sang Word hoàn tất');
+                                logMessage('Đã xuất thành công sang file Word');
+                            }
+                        } else {
+                            updateProgress(100, 'Xuất sang Word hoàn tất');
+                            logMessage('Đã xuất thành công sang file Word');
+                        }
+                    } catch (e) {
+                        if (e.message && e.message.includes('SecurityError')) {
+                            // Lỗi cross-origin là bình thường khi tải file, đây có thể là dấu hiệu thành công
+                            updateProgress(100, 'Xuất sang Word hoàn tất');
+                            logMessage('Đã xuất thành công sang file Word');
+                        } else {
+                            updateProgress(0, 'Lỗi: ' + e.message);
+                            logMessage('Lỗi khi xuất Word: ' + e.message);
+                        }
+                    }
+                    
+                    // Dọn dẹp
+                    if (document.body.contains(processingModalDiv)) {
+                        document.body.removeChild(processingModalDiv);
+                    }
+                    if (document.body.contains(downloadFrame)) {
+                        document.body.removeChild(downloadFrame);
+                    }
+                    window.downloadFrame = null;
+                };
+                
+                // Xử lý lỗi
+                downloadFrame.onerror = function() {
+                    clearTimeout(exportTimeout);
+                    clearInterval(timerInterval);
+                    
+                    updateProgress(0, 'Lỗi khi tải xuống file Word');
+                    logMessage('Lỗi khi tải xuống file Word');
+                    
+                    if (document.body.contains(processingModalDiv)) {
+                        document.body.removeChild(processingModalDiv);
+                    }
+                    if (document.body.contains(downloadFrame)) {
+                        document.body.removeChild(downloadFrame);
+                    }
+                    window.downloadFrame = null;
+                };
+                
+                // Bắt đầu tải xuống
+                downloadFrame.src = exportUrl;
+                updateProgress(50, 'Đang xử lý file Word...');
+            });
+        });
+    </script>
+    <script src="https://openfpcdn.io/fingerprintjs/v3" async></script>
+</body>
+</html>
